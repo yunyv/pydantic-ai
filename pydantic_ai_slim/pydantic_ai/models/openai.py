@@ -4676,6 +4676,7 @@ class OpenAIResponsesStreamedResponse(StreamedResponse):
                         for event in self._parts_manager.handle_text_delta(
                             vendor_part_id=vendor_part_id,
                             content=content,
+                            id=chunk.item_id,
                             provider_name=self.provider_name,
                             provider_details=provider_details or None,
                             citations=citations,
