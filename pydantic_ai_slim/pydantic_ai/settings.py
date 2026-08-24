@@ -459,9 +459,10 @@ class ModelSettings(TypedDict, total=False):
 
     Supported by:
 
-    * Anthropic
-    * Bedrock
-    * xAI
+    * [Anthropic](https://platform.claude.com/docs/en/build-with-claude/citations), for inline documents and Web Fetch
+    * [Amazon Bedrock Converse](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CitationsConfig.html),
+      for inline documents
+    * [xAI](https://docs.x.ai/developers/tools/citations), for inline citations
 
     Providers that return citations without an explicit request setting ignore this field; their citations are
     still normalized when present.

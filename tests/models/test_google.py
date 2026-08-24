@@ -34,7 +34,6 @@ from pydantic_ai import (
     BinaryContent,
     BinaryImage,
     Citation,
-    CitationAnchor,
     ContentCitationAnchor,
     DocumentCitationSource,
     DocumentUrl,
@@ -126,6 +125,7 @@ with try_import() as imports_successful:
         ModalityTokenCount,
         ModelArmorConfigDict,
         Part,
+        RagChunk,
         SafetyRating,
         Segment,
         UploadToFileSearchStoreConfigDict,
@@ -138,6 +138,7 @@ with try_import() as imports_successful:
         GoogleModelSettings,
         _content_model_response,  # pyright: ignore[reportPrivateUsage]
         _map_grounding_citations,  # pyright: ignore[reportPrivateUsage]
+        _map_grounding_source,  # pyright: ignore[reportPrivateUsage]
         _metadata_as_usage,  # pyright: ignore[reportPrivateUsage]
     )
     from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
@@ -156,11 +157,6 @@ pytestmark = [
     pytest.mark.anyio,
     pytest.mark.vcr,
 ]
-
-
-def _citation_summary(citations: list[Citation]) -> list[tuple[list[str | None], CitationAnchor | None]]:
-    """Keep live grounding snapshots focused on source grouping and anchor semantics."""
-    return [([source.title for source in citation.sources], citation.anchor) for citation in citations]
 
 
 @pytest.fixture()
@@ -617,71 +613,6 @@ async def test_google_model_vertex_labels(
     agent = Agent(model=model, instructions='You are a helpful chatbot.', model_settings=settings)
     result = await agent.run('What is the capital of France?')
     assert result.output == snapshot('The capital of France is Paris.\n')
-
-
-async def test_google_vertex_web_search_citations(
-    allow_model_requests: None, vertex_provider: GoogleProvider
-):  # pragma: lax no cover
-    agent = Agent(
-        GoogleModel('gemini-2.5-flash', provider=vertex_provider),
-        capabilities=[NativeTool(WebSearchTool())],
-    )
-
-    result = await agent.run("Use Google Search to find Pydantic AI's documentation and cite it.")
-
-    citations = citations_from_messages(result.all_messages())
-    assert _citation_summary(citations) == snapshot(
-        [
-            (['pydantic.dev'], ContentCitationAnchor(start=0, end=84)),
-            (['github.com'], ContentCitationAnchor(start=142, end=146)),
-            (['pydantic.dev'], ContentCitationAnchor(start=148, end=316)),
-            (['pydantic.dev'], ContentCitationAnchor(start=318, end=400)),
-        ]
-    )
-
-
-async def test_google_vertex_web_search_citations_stream(
-    allow_model_requests: None, vertex_provider: GoogleProvider
-):  # pragma: lax no cover
-    agent = Agent(
-        GoogleModel('gemini-2.5-flash', provider=vertex_provider),
-        capabilities=[NativeTool(WebSearchTool())],
-    )
-
-    async with agent.run_stream("Use Google Search to find Pydantic AI's documentation and cite it.") as result:
-        await result.get_output()
-
-    citations = citations_from_messages(result.all_messages())
-    assert _citation_summary(citations) == snapshot(
-        [
-            (['github.com'], ContentCitationAnchor(start=96, end=100)),
-            (['pydantic.dev', 'together.ai', 'github.com'], ContentCitationAnchor(start=102, end=248)),
-            (['pydantic.dev', 'github.com'], ContentCitationAnchor(start=251, end=391)),
-            (['pydantic.dev', 'github.com'], ContentCitationAnchor(start=393, end=586)),
-            (['pydantic.dev', 'pydantic.dev'], ContentCitationAnchor(start=588, end=734)),
-            (['pydantic.dev', 'pydantic.dev'], ContentCitationAnchor(start=736, end=817)),
-        ]
-    )
-
-
-async def test_google_gemini_web_search_citations(allow_model_requests: None, google_provider: GoogleProvider) -> None:
-    agent = Agent(
-        GoogleModel('gemini-2.5-flash', provider=google_provider),
-        capabilities=[NativeTool(WebSearchTool())],
-    )
-
-    result = await agent.run("Use Google Search to find Pydantic AI's documentation and cite it.")
-
-    citations = citations_from_messages(result.all_messages())
-    assert citations
-    assert all(isinstance(source, WebCitationSource) for citation in citations for source in citation.sources)
-    assert all(isinstance(citation.anchor, ContentCitationAnchor) for citation in citations)
-    assert any(len(citation.sources) > 1 for citation in citations)
-
-    follow_up = await agent.run(
-        'In one sentence, repeat which project you found.', message_history=result.all_messages()
-    )
-    assert follow_up.output
 
 
 async def test_google_model_iter_stream(allow_model_requests: None, google_provider: GoogleProvider):
@@ -5492,8 +5423,8 @@ def _assert_file_search_contexts(messages: list[ModelMessage], source_url: str) 
     assert len(citation.sources) == 1
     source = citation.sources[0]
     assert isinstance(source, DocumentCitationSource)
+    assert source.excerpts == ['Paris is the capital of France. The Eiffel Tower is a famous landmark in Paris.\n']
     assert source.provider_details == {
-        'text': 'Paris is the capital of France. The Eiffel Tower is a famous landmark in Paris.\n',
         'file_search_store': IsStr(regex=r'fileSearchStores/.+'),
         'custom_metadata': [{'key': 'source_url', 'string_value': source_url}],
     }
@@ -5531,13 +5462,14 @@ def test_google_grounding_offsets_are_python_character_indices():
     assert text[anchor.start : anchor.end] == 'café'
 
 
-def test_google_grounding_ignores_offset_inside_character():
+def test_google_grounding_with_offset_inside_character_is_unanchored():
+    source = WebCitationSource(url='https://example.com')
     metadata = GroundingMetadata(
-        grounding_chunks=[GroundingChunk(web=GroundingChunkWeb(uri='https://example.com'))],
+        grounding_chunks=[GroundingChunk(web=GroundingChunkWeb(uri=source.url))],
         grounding_supports=[GroundingSupport(grounding_chunk_indices=[0], segment=Segment(start_index=0, end_index=1))],
     )
 
-    assert _map_grounding_citations([Part(text='🙂')], metadata) == {}
+    assert _map_grounding_citations([Part(text='🙂')], metadata) == {0: [Citation(sources=[source])]}
 
 
 def test_google_zero_width_grounding_is_unanchored():
@@ -5552,36 +5484,120 @@ def test_google_zero_width_grounding_is_unanchored():
     }
 
 
-def test_google_grounding_mapping_edge_cases():
-    parts = [Part(text='first'), Part(text='unique second')]
-    retrieved = GroundingChunk(
-        retrieved_context=GroundingChunkRetrievedContext(
-            document_name='documents/1', title='Document', uri='https://example.com/document'
-        )
+@pytest.mark.parametrize(
+    ('context', 'expected_excerpt'),
+    [
+        pytest.param(
+            GroundingChunkRetrievedContext(text='retrieved context excerpt'),
+            'retrieved context excerpt',
+            id='retrieved-context',
+        ),
+        pytest.param(
+            GroundingChunkRetrievedContext(rag_chunk=RagChunk(text='RAG chunk excerpt')),
+            'RAG chunk excerpt',
+            id='rag-chunk',
+        ),
+    ],
+)
+def test_google_retrieved_context_excerpt(context: GroundingChunkRetrievedContext, expected_excerpt: str) -> None:
+    assert _map_grounding_source(GroundingChunk(retrieved_context=context)) == DocumentCitationSource(
+        excerpts=[expected_excerpt]
     )
-    empty_retrieved = GroundingChunk(retrieved_context=GroundingChunkRetrievedContext())
-    unsupported = GroundingChunk()
+
+
+def test_google_retrieved_context_preserves_distinct_excerpts():
+    context = GroundingChunkRetrievedContext(
+        text='retrieved context excerpt', rag_chunk=RagChunk(text='RAG chunk excerpt')
+    )
+
+    assert _map_grounding_source(GroundingChunk(retrieved_context=context)) == DocumentCitationSource(
+        excerpts=['retrieved context excerpt', 'RAG chunk excerpt']
+    )
+
+
+def test_google_grounding_uses_unique_segment_text_to_find_part():
+    source = WebCitationSource(url='https://example.com')
     metadata = GroundingMetadata(
-        grounding_chunks=[retrieved, empty_retrieved, unsupported],
+        grounding_chunks=[GroundingChunk(web=GroundingChunkWeb(uri=source.url))],
         grounding_supports=[
-            GroundingSupport(grounding_chunk_indices=[0], segment=Segment(part_index=0, end_index=5)),
             GroundingSupport(
-                grounding_chunk_indices=[0], segment=Segment(part_index=0, text='unique', start_index=0, end_index=6)
-            ),
-            GroundingSupport(grounding_chunk_indices=[0], segment=None),
-            GroundingSupport(grounding_chunk_indices=[0], segment=Segment(part_index=9, end_index=1)),
-            GroundingSupport(grounding_chunk_indices=[0], segment=Segment(part_index=9, text='i', end_index=1)),
-            GroundingSupport(grounding_chunk_indices=[1], segment=Segment(part_index=0, end_index=1)),
-            GroundingSupport(grounding_chunk_indices=[2], segment=Segment(part_index=0, end_index=1)),
-            GroundingSupport(grounding_chunk_indices=[0], segment=Segment(part_index=0, end_index=99)),
+                grounding_chunk_indices=[0],
+                segment=Segment(part_index=0, text='unique', start_index=0, end_index=6),
+            )
         ],
     )
 
-    citations = _map_grounding_citations(parts, metadata)
+    assert _map_grounding_citations([Part(text='first'), Part(text='unique second')], metadata) == {
+        1: [Citation(sources=[source], anchor=ContentCitationAnchor(start=0, end=6))]
+    }
 
-    assert set(citations) == {0, 1}
-    assert isinstance(citations[0][0].sources[0], DocumentCitationSource)
-    assert citations[0][0].sources[0].provider_details == {'uri': 'https://example.com/document'}
+
+def test_google_grounding_filters_sources_and_corresponding_confidence_scores():
+    first_source = WebCitationSource(url='https://first.example.com')
+    second_source = WebCitationSource(url='https://second.example.com')
+    metadata = GroundingMetadata(
+        grounding_chunks=[
+            GroundingChunk(web=GroundingChunkWeb(uri=first_source.url)),
+            GroundingChunk(),
+            GroundingChunk(web=GroundingChunkWeb(uri=second_source.url)),
+        ],
+        grounding_supports=[
+            GroundingSupport(
+                grounding_chunk_indices=[0, 1, 99, 2],
+                confidence_scores=[0.9, 0.1, 0.2, 0.0],
+                segment=Segment(start_index=0, end_index=6),
+            )
+        ],
+    )
+
+    assert _map_grounding_citations([Part(text='answer')], metadata) == {
+        0: [
+            Citation(
+                sources=[first_source, second_source],
+                anchor=ContentCitationAnchor(start=0, end=6),
+                provider_details={'confidence_scores': [0.9, 0.0]},
+            )
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    'support',
+    [
+        pytest.param(GroundingSupport(grounding_chunk_indices=[0]), id='missing-segment'),
+        pytest.param(
+            GroundingSupport(grounding_chunk_indices=[0], segment=Segment(part_index=9, end_index=1)),
+            id='invalid-part-index',
+        ),
+        pytest.param(
+            GroundingSupport(grounding_chunk_indices=[0], segment=Segment(part_index=9, text='i', end_index=1)),
+            id='ambiguous-segment-text',
+        ),
+    ],
+)
+def test_google_grounding_skips_unlocatable_segment(support: GroundingSupport):
+    metadata = GroundingMetadata(
+        grounding_chunks=[GroundingChunk(web=GroundingChunkWeb(uri='https://example.com'))],
+        grounding_supports=[support],
+    )
+
+    assert _map_grounding_citations([Part(text='first'), Part(text='third')], metadata) == {}
+
+
+@pytest.mark.parametrize(
+    'chunk',
+    [
+        pytest.param(GroundingChunk(), id='unsupported'),
+        pytest.param(GroundingChunk(retrieved_context=GroundingChunkRetrievedContext()), id='empty-retrieved-context'),
+    ],
+)
+def test_google_grounding_skips_unrenderable_source(chunk: GroundingChunk):
+    metadata = GroundingMetadata(
+        grounding_chunks=[chunk],
+        grounding_supports=[GroundingSupport(grounding_chunk_indices=[0], segment=Segment(start_index=0, end_index=1))],
+    )
+
+    assert _map_grounding_citations([Part(text='answer')], metadata) == {}
 
 
 async def test_google_unsupported_citation_metadata_is_not_exposed(
@@ -5649,6 +5665,7 @@ async def test_google_stream_citations_follow_provider_part_index_on_metadata_on
         _model_name='gemini-test',
         _response=cast(Any, PeekableAsyncStream(_aiter_chunks(chunks))),
         _provider_name='google',
+        _model_id_namespace='google',
         _provider_url='',
     )
 
@@ -5680,6 +5697,7 @@ async def test_google_stream_merges_adjacent_text_without_citations():
         _model_name='gemini-test',
         _response=cast(Any, PeekableAsyncStream(_aiter_chunks(chunks))),
         _provider_name='google',
+        _model_id_namespace='google',
         _provider_url='',
     )
 
@@ -5723,6 +5741,7 @@ async def test_google_stream_citations_can_reference_earlier_grounding_chunks():
         _model_name='gemini-test',
         _response=cast(Any, PeekableAsyncStream(_aiter_chunks(chunks))),
         _provider_name='google',
+        _model_id_namespace='google',
         _provider_url='',
     )
 
@@ -5782,6 +5801,7 @@ async def test_google_stream_keeps_text_parts_separate_across_non_text_parts():
         _model_name='gemini-test',
         _response=cast(Any, PeekableAsyncStream(_aiter_chunks(chunks))),
         _provider_name='google',
+        _model_id_namespace='google',
         _provider_url='',
     )
 
@@ -5833,6 +5853,7 @@ async def test_google_stream_reuses_provider_index_for_repeated_thinking_deltas(
         _model_name='gemini-test',
         _response=cast(Any, PeekableAsyncStream(_aiter_chunks(chunks))),
         _provider_name='google',
+        _model_id_namespace='google',
         _provider_url='',
     )
 

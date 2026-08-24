@@ -120,6 +120,7 @@ def _map_citations(citations: Sequence[BetaTextCitation] | None) -> list[Citatio
                 WebCitationSource(
                     url=citation.url,
                     title=citation.title,
+                    excerpts=[citation.cited_text] if citation.cited_text else [],
                 )
             )
         elif isinstance(
@@ -129,17 +130,9 @@ def _map_citations(citations: Sequence[BetaTextCitation] | None) -> list[Citatio
             details = citation.model_dump(exclude={'cited_text', 'document_title', 'file_id'})
             sources.append(
                 DocumentCitationSource(
-                    file_id=citation.file_id,
+                    document_id=citation.file_id,
                     title=citation.document_title,
-                    provider_details=details or None,
-                )
-            )
-        elif isinstance(citation, BetaCitationSearchResultLocation):
-            details = citation.model_dump(exclude={'cited_text', 'source', 'title'})
-            sources.append(
-                WebCitationSource(
-                    url=citation.source,
-                    title=citation.title,
+                    excerpts=[citation.cited_text] if citation.cited_text else [],
                     provider_details=details or None,
                 )
             )
@@ -210,7 +203,6 @@ try:
         BetaCitationPageLocation,
         BetaCitationsConfigParam,
         BetaCitationsDelta,
-        BetaCitationSearchResultLocation,
         BetaCitationsWebSearchResultLocation,
         BetaCodeExecutionTool20250825Param,
         BetaCodeExecutionTool20260120Param,
@@ -1520,9 +1512,9 @@ class AnthropicModel(Model[AsyncAnthropicClient]):
 
     @staticmethod
     def _map_web_fetch_tool(
-        tool: WebFetchTool, supports_dynamic_filtering: bool
+        tool: WebFetchTool, supports_dynamic_filtering: bool, include_citations: bool
     ) -> tuple[BetaWebFetchTool20260209Param | BetaWebFetchTool20250910Param, str | None]:
-        citations = BetaCitationsConfigParam(enabled=tool.enable_citations) if tool.enable_citations else None
+        citations = BetaCitationsConfigParam(enabled=True) if tool.enable_citations or include_citations else None
         if supports_dynamic_filtering:
             return (
                 BetaWebFetchTool20260209Param(
@@ -1570,7 +1562,9 @@ class AnthropicModel(Model[AsyncAnthropicClient]):
                 if tool.files and any(file.provider_name == self.system for file in tool.files):
                     beta_features.add('files-api-2025-04-14')
             elif isinstance(tool, WebFetchTool):  # pragma: no branch
-                web_fetch_tool, beta_feature = self._map_web_fetch_tool(tool, supports_dynamic_filtering)
+                web_fetch_tool, beta_feature = self._map_web_fetch_tool(
+                    tool, supports_dynamic_filtering, model_settings.get('include_citations', False)
+                )
                 tools.append(web_fetch_tool)
                 if beta_feature is not None:
                     beta_features.add(beta_feature)

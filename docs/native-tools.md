@@ -1158,7 +1158,15 @@ This setting is a best-effort request: providers that do not require an explicit
 still return no citations. It is separate from provider-specific settings that retain raw annotation payloads.
 
 ```python {test="skip"}
-from pydantic_ai import Agent, Citation, ContentCitationAnchor, MarkerCitationAnchor, TextPart, WebCitationSource
+from pydantic_ai import (
+    Agent,
+    Citation,
+    ContentCitationAnchor,
+    DocumentCitationSource,
+    MarkerCitationAnchor,
+    TextPart,
+    WebCitationSource,
+)
 from pydantic_ai.capabilities import NativeTool
 from pydantic_ai.native_tools import WebSearchTool
 
@@ -1179,7 +1187,10 @@ for message in result.all_messages():
 
                 for source in citation.sources:
                     if isinstance(source, WebCitationSource):
-                        print(location, source.title, source.url)
+                        label = source.title or source.url
+                    elif isinstance(source, DocumentCitationSource):
+                        label = source.title or source.document_id or 'Document source'
+                    print(location, label, source.excerpts)
 ```
 
 A citation can reference one or more web or document sources. Its optional
@@ -1193,6 +1204,32 @@ Google grounding can produce content anchors, including citations where several 
 OpenAI web-search citations can produce marker anchors, while OpenAI file citations and Anthropic web-search citations
 may be unanchored. Consumers should therefore handle all three cases rather than assuming every source identifies a
 specific assertion.
+
+A [`DocumentCitationSource`][pydantic_ai.messages.DocumentCitationSource] means non-web evidence, not necessarily a
+file uploaded through Pydantic AI. It can refer to an inline text or PDF document, a provider-hosted file found through
+file search, an S3 document sent through Bedrock, a Vertex Search/RAG document, or an xAI collection file. Its optional
+`document_id` is an opaque file or document identifier in that provider's storage system; it is not a local path and
+does not imply that the application can download the document. Inline documents may have no stable identifier or
+title, in which case provider-specific location information is retained in `provider_details` and renderers should use
+a generic fallback label.
+
+Both source types contain an `excerpts` list of provider-selected supporting passages. An item can be an exact cited
+passage or a broader retrieval chunk, depending on the provider. The list preserves separate passages when a provider
+returns more than one for the same source. It lets applications show evidence previews without separately retrieving
+the source, but should not be interpreted as a provider-independent exact quotation or as the text selected by the
+citation's anchor.
+
+### Provider support
+
+| Provider/API | Normalized response | Request behavior | Provider support notes |
+| --- | --- | --- | --- |
+| [Anthropic](https://platform.claude.com/docs/en/build-with-claude/citations) | Web-search and document citations | `include_citations=True` enables citations for inline documents and Anthropic Web Fetch; Web Search supplies citations with grounded output | Client-provided `search_result` citations are outside this initial normalized surface |
+| [Amazon Bedrock Converse](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CitationsConfig.html) | Inline document citations | `include_citations=True` enables citations on supported document inputs | Separate `sourceContent` entries remain separate `excerpts` |
+| [Google Gemini API](https://ai.google.dev/gemini-api/docs/google-search) | Web grounding and file-search grounding | No citation-specific setting; enable the corresponding native grounding tool | Grounding byte offsets are normalized to Python character offsets |
+| [Google Cloud Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1/GenerateContentResponse#GroundingMetadata) | Google Search and Vertex retrieval grounding | No citation-specific setting; enable the corresponding native grounding tool | Retrieved document resource names map to `document_id` |
+| [OpenAI Chat and Responses](https://platform.openai.com/docs/guides/tools-web-search) | URL annotations and Responses file citations | No citation-specific setting; enable the corresponding native search tool | `container_file_citation` annotations are not file-search evidence and remain available only through raw provider annotations |
+| [OpenRouter](https://openrouter.ai/docs/guides/features/plugins/web-search) | OpenAI-compatible URL annotations | No citation-specific setting; enable OpenRouter web search | Annotation `content` is preserved in `excerpts`; annotations without a safe range remain unanchored |
+| [xAI](https://docs.x.ai/developers/tools/citations) | Inline web, X, and collection citations | `include_citations=True` requests inline citations | The native-tool source inventory remains on `NativeToolReturnPart`; only inline attribution is normalized here |
 
 For example, the normalized provider results can have these shapes:
 
@@ -1222,11 +1259,21 @@ TextPart(
 # Anthropic: the source qualifies this text part, but no character range was supplied.
 TextPart(
     'Pydantic validates data.',
-    citations=[Citation(sources=[WebCitationSource('https://example.com')])],
+    citations=[
+        Citation(
+            sources=[
+                WebCitationSource(
+                    'https://example.com',
+                    excerpts=['Pydantic provides data validation using Python type hints.'],
+                )
+            ]
+        )
+    ],
 )
 ```
 
-Treat citation URLs and titles as untrusted data when rendering them.
+Treat citation URLs, titles, and excerpts as untrusted data. Excerpts can contain private retrieved content, so
+applications should choose deliberately whether to log, render, or send them to a client.
 
 ## API Reference
 

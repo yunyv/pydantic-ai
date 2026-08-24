@@ -100,6 +100,7 @@ with try_import() as imports_successful:
     from openai.types.responses.response_output_refusal import ResponseOutputRefusal
     from openai.types.responses.response_output_text import (
         AnnotationContainerFileCitation,
+        AnnotationFileCitation,
         AnnotationURLCitation,
         ResponseOutputText,
     )
@@ -164,7 +165,7 @@ def test_openai_unsupported_annotation_is_ignored():
     assert part.provider_details is None
 
 
-def test_openai_invalid_url_citation_range_is_ignored():
+def test_openai_invalid_url_citation_range_is_unanchored():
     annotation = AnnotationURLCitation(
         type='url_citation',
         start_index=20,
@@ -191,7 +192,41 @@ def test_openai_invalid_url_citation_range_is_ignored():
 
     [part] = result.parts
     assert isinstance(part, TextPart)
-    assert part.provider_details is None
+    assert part.citations == [Citation(sources=[WebCitationSource(url='https://example.com', title='Example')])]
+
+
+def test_openai_file_citation_uses_document_identifier():
+    annotation = AnnotationFileCitation(
+        type='file_citation',
+        file_id='file-1',
+        filename='report.pdf',
+        index=12,
+    )
+    response = response_message(
+        [
+            ResponseOutputMessage(
+                id='message-1',
+                content=[ResponseOutputText(text='answer', type='output_text', annotations=[annotation])],
+                role='assistant',
+                status='completed',
+                type='message',
+            )
+        ]
+    )
+    model = OpenAIResponsesModel('gpt-5', provider=OpenAIProvider(api_key='not-used'))
+
+    result = model._process_response(  # pyright: ignore[reportPrivateUsage]
+        response, OpenAIResponsesModelSettings(), ModelRequestParameters()
+    )
+
+    [part] = result.parts
+    assert isinstance(part, TextPart)
+    assert part.citations == [
+        Citation(
+            sources=[DocumentCitationSource(document_id='file-1', title='report.pdf')],
+            provider_details={'index': 12},
+        )
+    ]
 
 
 async def test_openai_response_with_null_text_and_citation(allow_model_requests: None):

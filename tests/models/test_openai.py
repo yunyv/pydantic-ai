@@ -77,7 +77,6 @@ from pydantic_ai.usage import RequestUsage
 
 from .._inline_snapshot import snapshot
 from ..conftest import IsDatetime, IsNow, IsStr, TestEnv, message, try_import
-from .citation_utils import citations_from_messages
 from .mock_openai import (
     MockOpenAI,
     MockOpenAIResponses,
@@ -3983,7 +3982,7 @@ async def test_openai_chat_citation_without_content(allow_model_requests: None):
     ]
 
 
-async def test_openai_chat_invalid_citation_range_is_ignored(allow_model_requests: None):
+async def test_openai_chat_invalid_citation_range_is_unanchored(allow_model_requests: None):
     annotation = chat.chat_completion_message.Annotation(
         type='url_citation',
         url_citation=chat.chat_completion_message.AnnotationURLCitation(
@@ -3997,7 +3996,11 @@ async def test_openai_chat_invalid_citation_range_is_ignored(allow_model_request
 
     result = await Agent(model).run('Question')
 
-    assert result.all_messages()[1].parts == [TextPart('Answer')]
+    assert result.all_messages()[1].parts == [
+        TextPart(
+            'Answer', citations=[Citation(sources=[WebCitationSource(url='https://example.com', title='Example')])]
+        )
+    ]
 
 
 async def test_openai_chat_stream_citation_after_text_transformation_is_ignored(allow_model_requests: None):
@@ -4032,7 +4035,7 @@ async def test_openai_chat_stream_citation_after_text_transformation_is_ignored(
     assert result.all_messages()[1].parts == [TextPart('[1] extra')]
 
 
-async def test_openai_chat_stream_annotations_before_text(allow_model_requests: None):
+async def test_openai_chat_stream_annotations_before_referenced_text(allow_model_requests: None):
     annotation = chat.chat_completion_message.Annotation(
         type='url_citation',
         url_citation=chat.chat_completion_message.AnnotationURLCitation(
@@ -4040,8 +4043,9 @@ async def test_openai_chat_stream_annotations_before_text(allow_model_requests: 
         ),
     )
     stream = [
+        text_chunk('Answer '),
         chunk([ChoiceDelta.model_construct(role='assistant', annotations=[annotation.model_dump()])]),
-        text_chunk('Answer [1]'),
+        text_chunk('[1]'),
         chunk([ChoiceDelta.model_construct(role='assistant')], finish_reason='stop'),
     ]
     model = OpenAIChatModel('gpt-4o', provider=OpenAIProvider(openai_client=MockOpenAI.create_mock_stream(stream)))
@@ -4063,6 +4067,46 @@ async def test_openai_chat_stream_annotations_before_text(allow_model_requests: 
             provider_name='openai',
             provider_details={'annotations': [annotation.model_dump()]},
         )
+    ]
+
+
+async def test_openai_chat_stream_accumulates_raw_annotation_batches(allow_model_requests: None):
+    annotations = [
+        chat.chat_completion_message.Annotation(
+            type='url_citation',
+            url_citation=chat.chat_completion_message.AnnotationURLCitation(
+                url=f'https://example.com/{index}',
+                title=f'Example {index}',
+                start_index=start,
+                end_index=end,
+            ),
+        )
+        for index, (start, end) in enumerate(((7, 10), (11, 14)), start=1)
+    ]
+    stream = [
+        text_chunk('Answer [1] [2]'),
+        *[
+            chunk([ChoiceDelta.model_construct(role='assistant', annotations=[annotation.model_dump()])])
+            for annotation in annotations
+        ],
+        chunk([ChoiceDelta.model_construct(role='assistant')], finish_reason='stop'),
+    ]
+    model = OpenAIChatModel('gpt-4o', provider=OpenAIProvider(openai_client=MockOpenAI.create_mock_stream(stream)))
+
+    async with Agent(model).run_stream(
+        'Question', model_settings=OpenAIChatModelSettings(openai_include_raw_annotations=True)
+    ) as result:
+        await result.get_output()
+
+    [part] = result.all_messages()[1].parts
+    assert isinstance(part, TextPart)
+    assert part.provider_details == {'annotations': [annotation.model_dump() for annotation in annotations]}
+    assert part.citations == [
+        Citation(
+            sources=[WebCitationSource(url=f'https://example.com/{index}', title=f'Example {index}')],
+            anchor=MarkerCitationAnchor(start=start, end=end),
+        )
+        for index, (start, end) in enumerate(((7, 10), (11, 14)), start=1)
     ]
 
 
@@ -4175,53 +4219,6 @@ async def test_openai_web_search_tool(allow_model_requests: None, openai_api_key
 
     result = await agent.run('What day is today?')
     assert result.output == snapshot('May 14, 2025, 8:51:29 AM ')
-
-
-async def test_openai_responses_web_search_citations(allow_model_requests: None, openai_api_key: str) -> None:
-    agent = Agent(
-        OpenAIResponsesModel('gpt-5.4-mini', provider=OpenAIProvider(api_key=openai_api_key)),
-        capabilities=[NativeTool(WebSearchTool(max_uses=1))],
-    )
-
-    result = await agent.run("Use web search to find Pydantic AI's GitHub repository and cite it.")
-
-    assert citations_from_messages(result.all_messages()) == snapshot(
-        [
-            Citation(
-                sources=[
-                    WebCitationSource(
-                        url='https://github.com/pydantic/pydantic-ai?utm_source=openai',
-                        title='GitHub - pydantic/pydantic-ai: AI Agent Framework, the Pydantic way · GitHub',
-                    )
-                ],
-                anchor=MarkerCitationAnchor(start=70, end=143),
-            )
-        ]
-    )
-
-
-async def test_openai_responses_web_search_citations_stream(allow_model_requests: None, openai_api_key: str) -> None:
-    agent = Agent(
-        OpenAIResponsesModel('gpt-5.4-mini', provider=OpenAIProvider(api_key=openai_api_key)),
-        capabilities=[NativeTool(WebSearchTool(max_uses=1))],
-    )
-
-    async with agent.run_stream("Use web search to find Pydantic AI's GitHub repository and cite it.") as result:
-        await result.get_output()
-
-    assert citations_from_messages(result.all_messages()) == snapshot(
-        [
-            Citation(
-                sources=[
-                    WebCitationSource(
-                        url='https://github.com/pydantic/pydantic-ai?utm_source=openai',
-                        title='GitHub - pydantic/pydantic-ai: AI Agent Framework, the Pydantic way · GitHub',
-                    )
-                ],
-                anchor=MarkerCitationAnchor(start=71, end=144),
-            )
-        ]
-    )
 
 
 async def test_openai_web_search_tool_with_user_location(allow_model_requests: None, openai_api_key: str):

@@ -202,6 +202,10 @@ pytestmark = [
 ]
 
 
+def _citation_delta_event(index: int) -> PartDeltaEvent:
+    return PartDeltaEvent(index=index, delta=TextPartDelta(content_delta='', citations_delta=IsCitationList()))
+
+
 @pytest.mark.parametrize(
     ('citation', 'expected_source'),
     [
@@ -216,8 +220,9 @@ pytestmark = [
                 type='char_location',
             ),
             DocumentCitationSource(
-                file_id='file-1',
+                document_id='file-1',
                 title='Report',
+                excerpts=['document excerpt'],
                 provider_details={
                     'document_index': 0,
                     'start_char_index': 0,
@@ -238,6 +243,7 @@ pytestmark = [
             ),
             DocumentCitationSource(
                 title='Report',
+                excerpts=['page excerpt'],
                 provider_details={
                     'document_index': 0,
                     'start_page_number': 2,
@@ -258,6 +264,7 @@ pytestmark = [
             ),
             DocumentCitationSource(
                 title='Report',
+                excerpts=['block excerpt'],
                 provider_details={
                     'document_index': 0,
                     'start_block_index': 1,
@@ -267,32 +274,39 @@ pytestmark = [
             ),
             id='document-content-block-range',
         ),
-        pytest.param(
-            BetaCitationSearchResultLocation(
-                cited_text='search excerpt',
-                search_result_index=0,
-                source='https://example.com/result',
-                title='Search result',
-                start_block_index=0,
-                end_block_index=1,
-                type='search_result_location',
-            ),
-            WebCitationSource(
-                url='https://example.com/result',
-                title='Search result',
-                provider_details={
-                    'search_result_index': 0,
-                    'start_block_index': 0,
-                    'end_block_index': 1,
-                    'type': 'search_result_location',
-                },
-            ),
-            id='client-search-result',
-        ),
     ],
 )
 def test_anthropic_maps_citation_source_variants(citation: BetaTextCitation, expected_source: CitationSource):
     assert _map_citations([citation]) == [Citation(sources=[expected_source])]
+
+
+def test_anthropic_empty_cited_text_is_not_an_excerpt() -> None:
+    citation = BetaCitationsWebSearchResultLocation(
+        type='web_search_result_location',
+        url='https://example.com',
+        title='Example',
+        cited_text='',
+        encrypted_index='opaque-index',
+    )
+
+    assert _map_citations([citation]) == [
+        Citation(sources=[WebCitationSource(url='https://example.com', title='Example')])
+    ]
+
+
+@pytest.mark.parametrize('source', ['result-123', 'https://example.com/result'])
+def test_anthropic_client_search_result_citation_is_not_normalized(source: str):
+    citation = BetaCitationSearchResultLocation(
+        cited_text='search excerpt',
+        search_result_index=0,
+        source=source,
+        title='Search result',
+        start_block_index=0,
+        end_block_index=1,
+        type='search_result_location',
+    )
+
+    assert _map_citations([citation]) is None
 
 
 async def test_anthropic_stream_citations(allow_model_requests: None):
@@ -377,9 +391,11 @@ async def test_anthropic_stream_citations(allow_model_requests: None):
                         WebCitationSource(
                             url='https://example.com',
                             title='Example',
+                            excerpts=['web excerpt'],
                         ),
                         DocumentCitationSource(
                             title='Report',
+                            excerpts=['first'],
                             provider_details={
                                 'document_index': 0,
                                 'start_char_index': 0,
@@ -389,6 +405,7 @@ async def test_anthropic_stream_citations(allow_model_requests: None):
                         ),
                         DocumentCitationSource(
                             title='Report',
+                            excerpts=['second'],
                             provider_details={
                                 'document_index': 0,
                                 'start_char_index': 6,
@@ -3256,7 +3273,11 @@ async def test_anthropic_include_citations_request_setting(allow_model_requests:
     mock_client = MockAnthropic.create_mock(response)
     model = AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
 
-    await Agent(model, model_settings=ModelSettings(include_citations=include_citations)).run(
+    await Agent(
+        model,
+        capabilities=[NativeTool(WebFetchTool())],
+        model_settings=ModelSettings(include_citations=include_citations),
+    ).run(
         [
             'What is the return window?',
             BinaryContent(data=b'Returns are allowed within thirty days.', media_type='text/plain'),
@@ -3276,136 +3297,10 @@ async def test_anthropic_include_citations_request_setting(allow_model_requests:
         expected['citations'] = {'enabled': True}
     assert document == expected
 
-
-async def test_anthropic_document_citations(allow_model_requests: None, anthropic_api_key: str) -> None:
-    agent = Agent(
-        AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(api_key=anthropic_api_key)),
-        model_settings=ModelSettings(include_citations=True),
+    web_fetch_tool = next(
+        tool for tool in get_mock_chat_completion_kwargs(mock_client)[0]['tools'] if tool['name'] == 'web_fetch'
     )
-
-    result = await agent.run(
-        [
-            'According to the document, what is the return window? Answer in one sentence and cite the document.',
-            BinaryContent(data=b'The return window is thirty days from purchase.', media_type='text/plain'),
-        ]
-    )
-
-    citations = citations_from_messages(result.all_messages())
-    assert citations == snapshot(
-        [
-            Citation(
-                sources=[
-                    DocumentCitationSource(
-                        provider_details={
-                            'document_index': 0,
-                            'end_char_index': 47,
-                            'start_char_index': 0,
-                            'type': 'char_location',
-                        }
-                    )
-                ]
-            )
-        ]
-    )
-
-
-async def test_anthropic_document_citations_stream(allow_model_requests: None, anthropic_api_key: str) -> None:
-    agent = Agent(
-        AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(api_key=anthropic_api_key)),
-        model_settings=ModelSettings(include_citations=True),
-    )
-
-    async with agent.run_stream(
-        [
-            'According to the document, what is the return window? Answer in one sentence and cite the document.',
-            BinaryContent(data=b'The return window is thirty days from purchase.', media_type='text/plain'),
-        ]
-    ) as result:
-        await result.get_output()
-
-    citations = citations_from_messages(result.all_messages())
-    assert citations == snapshot(
-        [
-            Citation(
-                sources=[
-                    DocumentCitationSource(
-                        provider_details={
-                            'document_index': 0,
-                            'end_char_index': 47,
-                            'start_char_index': 0,
-                            'type': 'char_location',
-                        }
-                    )
-                ]
-            )
-        ]
-    )
-
-
-async def test_anthropic_pdf_citations(
-    allow_model_requests: None, anthropic_api_key: str, document_content: BinaryContent
-) -> None:
-    agent = Agent(
-        AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(api_key=anthropic_api_key)),
-        model_settings=ModelSettings(include_citations=True),
-    )
-
-    result = await agent.run(
-        ['What text appears in this PDF? Answer in one sentence and cite the document.', document_content]
-    )
-
-    citations = citations_from_messages(result.all_messages())
-    assert citations == snapshot(
-        [
-            Citation(
-                sources=[
-                    DocumentCitationSource(
-                        provider_details={
-                            'document_index': 0,
-                            'end_page_number': 2,
-                            'start_page_number': 1,
-                            'type': 'page_location',
-                        }
-                    )
-                ]
-            )
-        ]
-    )
-
-
-async def test_anthropic_web_search_citations(allow_model_requests: None, anthropic_api_key: str) -> None:
-    agent = Agent(
-        AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(api_key=anthropic_api_key)),
-        capabilities=[NativeTool(WebSearchTool(max_uses=1))],
-    )
-
-    result = await agent.run("Use web search to find Pydantic AI's documentation and cite it.")
-
-    citations = citations_from_messages(result.all_messages())
-    assert citations
-    assert all(isinstance(source, WebCitationSource) for citation in citations for source in citation.sources)
-    assert all(citation.anchor is None for citation in citations)
-    assert any(len(citation.sources) > 1 for citation in citations)
-
-    follow_up = await agent.run(
-        'In one sentence, repeat which project you found.', message_history=result.all_messages()
-    )
-    assert follow_up.output
-
-
-async def test_anthropic_web_search_citations_stream(allow_model_requests: None, anthropic_api_key: str) -> None:
-    agent = Agent(
-        AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(api_key=anthropic_api_key)),
-        capabilities=[NativeTool(WebSearchTool(max_uses=1))],
-    )
-
-    async with agent.run_stream("Use web search to find Pydantic AI's documentation and cite it.") as result:
-        await result.get_output()
-
-    citations = citations_from_messages(result.all_messages())
-    assert citations
-    assert all(isinstance(source, WebCitationSource) for citation in citations for source in citation.sources)
-    assert all(citation.anchor is None for citation in citations)
+    assert web_fetch_tool.get('citations') == ({'enabled': True} if include_citations else None)
 
 
 async def test_document_url_input(allow_model_requests: None, anthropic_api_key: str):
@@ -6796,12 +6691,10 @@ According to AccuWeather's forecast, \
             ),
             PartStartEvent(
                 index=7,
-                part=TextPart(
-                    content='today (September 16) shows a high of 76°F and low of 59°F',
-                    citations=IsCitationList(),
-                ),
+                part=TextPart(content='today (September 16) shows a high of 76°F and low of 59°F'),
                 previous_part_kind='text',
             ),
+            _citation_delta_event(7),
             PartEndEvent(
                 index=7,
                 part=TextPart(
@@ -6835,12 +6728,10 @@ From the recent San Francisco Chronicle weather report, \
             ),
             PartStartEvent(
                 index=9,
-                part=TextPart(
-                    content='average mid-September highs in San Francisco are around 70 degrees',
-                    citations=IsCitationList(),
-                ),
+                part=TextPart(content='average mid-September highs in San Francisco are around 70 degrees'),
                 previous_part_kind='text',
             ),
+            _citation_delta_event(9),
             PartEndEvent(
                 index=9,
                 part=TextPart(
@@ -6886,12 +6777,12 @@ The general weather pattern for San Francisco in September includes:
             PartStartEvent(
                 index=11,
                 part=TextPart(
-                    content='Daytime temperatures usually reach 22°C (72°F) in San Francisco in September, falling to 13°C',
-                    citations=IsCitationList(),
+                    content='Daytime temperatures usually reach 22°C (72°F) in San Francisco in September, falling to 13°C'
                 ),
                 previous_part_kind='text',
             ),
             PartDeltaEvent(index=11, delta=TextPartDelta(content_delta=' (55°F) at night')),
+            _citation_delta_event(11),
             PartEndEvent(
                 index=11,
                 part=TextPart(
@@ -6922,13 +6813,11 @@ The general weather pattern for San Francisco in September includes:
             ),
             PartStartEvent(
                 index=13,
-                part=TextPart(
-                    content='There are normally 9 hours of bright sunshine each day in San Francisco in',
-                    citations=IsCitationList(),
-                ),
+                part=TextPart(content='There are normally 9 hours of bright sunshine each day in San Francisco in'),
                 previous_part_kind='text',
             ),
             PartDeltaEvent(index=13, delta=TextPartDelta(content_delta=' September')),
+            _citation_delta_event(13),
             PartEndEvent(
                 index=13,
                 part=TextPart(
@@ -6960,13 +6849,13 @@ The general weather pattern for San Francisco in September includes:
             PartStartEvent(
                 index=15,
                 part=TextPart(
-                    content='San Francisco experiences minimal rainfall in September, with an average precipitation of just 3mm.',
-                    citations=IsCitationList(),
+                    content='San Francisco experiences minimal rainfall in September, with an average precipitation of just 3mm.'
                 ),
                 previous_part_kind='text',
             ),
             PartDeltaEvent(index=15, delta=TextPartDelta(content_delta=' Typically, there are no rainy days')),
             PartDeltaEvent(index=15, delta=TextPartDelta(content_delta=' during this month')),
+            _citation_delta_event(15),
             PartEndEvent(
                 index=15,
                 part=TextPart(
@@ -11471,8 +11360,7 @@ Based on the search results, I can identify the top 3 major news stories from ar
             PartStartEvent(
                 index=6,
                 part=TextPart(
-                    content='European leaders held a high-stakes meeting Wednesday with President Trump, Vice President Vance, Ukraine',
-                    citations=IsCitationList(),
+                    content='European leaders held a high-stakes meeting Wednesday with President Trump, Vice President Vance, Ukraine'
                 ),
                 previous_part_kind='text',
             ),
@@ -11480,6 +11368,7 @@ Based on the search results, I can identify the top 3 major news stories from ar
             PartDeltaEvent(index=6, delta=TextPartDelta(content_delta="enskyy and NATO's chief ahea")),
             PartDeltaEvent(index=6, delta=TextPartDelta(content_delta="d of Friday's U.S.-")),
             PartDeltaEvent(index=6, delta=TextPartDelta(content_delta='Russia summit')),
+            _citation_delta_event(6),
             PartEndEvent(
                 index=6,
                 part=TextPart(
@@ -11492,13 +11381,11 @@ Based on the search results, I can identify the top 3 major news stories from ar
             PartEndEvent(index=7, part=TextPart(content='. '), next_part_kind='text'),
             PartStartEvent(
                 index=8,
-                part=TextPart(
-                    content='The White House lowered its expectations surrounding',
-                    citations=IsCitationList(),
-                ),
+                part=TextPart(content='The White House lowered its expectations surrounding'),
                 previous_part_kind='text',
             ),
             PartDeltaEvent(index=8, delta=TextPartDelta(content_delta=' the Trump-Putin summit on Friday')),
+            _citation_delta_event(8),
             PartEndEvent(
                 index=8,
                 part=TextPart(
@@ -11511,16 +11398,14 @@ Based on the search results, I can identify the top 3 major news stories from ar
             PartEndEvent(index=9, part=TextPart(content='. '), next_part_kind='text'),
             PartStartEvent(
                 index=10,
-                part=TextPart(
-                    content='In a surprise move just days before the Trump-Putin summit',
-                    citations=IsCitationList(),
-                ),
+                part=TextPart(content='In a surprise move just days before the Trump-Putin summit'),
                 previous_part_kind='text',
             ),
             PartDeltaEvent(index=10, delta=TextPartDelta(content_delta=', the White House swapped out pro')),
             PartDeltaEvent(index=10, delta=TextPartDelta(content_delta="-EU PM Tusk for Poland's new president –")),
             PartDeltaEvent(index=10, delta=TextPartDelta(content_delta=" a political ally who once opposed Ukraine's")),
             PartDeltaEvent(index=10, delta=TextPartDelta(content_delta=' NATO and EU bids')),
+            _citation_delta_event(10),
             PartEndEvent(
                 index=10,
                 part=TextPart(
@@ -11556,13 +11441,13 @@ Based on the search results, I can identify the top 3 major news stories from ar
             PartStartEvent(
                 index=12,
                 part=TextPart(
-                    content="Federal law enforcement's presence in Washington, DC, continued to be felt Wednesday as President Donald Trump's tak",
-                    citations=IsCitationList(),
+                    content="Federal law enforcement's presence in Washington, DC, continued to be felt Wednesday as President Donald Trump's tak"
                 ),
                 previous_part_kind='text',
             ),
             PartDeltaEvent(index=12, delta=TextPartDelta(content_delta="eover of the city's police entered its thir")),
             PartDeltaEvent(index=12, delta=TextPartDelta(content_delta='d night')),
+            _citation_delta_event(12),
             PartEndEvent(
                 index=12,
                 part=TextPart(
@@ -11576,8 +11461,7 @@ Based on the search results, I can identify the top 3 major news stories from ar
             PartStartEvent(
                 index=14,
                 part=TextPart(
-                    content="National Guard troops arrived in Washington, D.C., following President Trump's deployment an",
-                    citations=IsCitationList(),
+                    content="National Guard troops arrived in Washington, D.C., following President Trump's deployment an"
                 ),
                 previous_part_kind='text',
             ),
@@ -11585,6 +11469,7 @@ Based on the search results, I can identify the top 3 major news stories from ar
                 index=14, delta=TextPartDelta(content_delta='d federalization of local police to crack down on crime')
             ),
             PartDeltaEvent(index=14, delta=TextPartDelta(content_delta=" in the nation's capital")),
+            _citation_delta_event(14),
             PartEndEvent(
                 index=14,
                 part=TextPart(
@@ -11597,13 +11482,11 @@ Based on the search results, I can identify the top 3 major news stories from ar
             PartEndEvent(index=15, part=TextPart(content='. '), next_part_kind='text'),
             PartStartEvent(
                 index=16,
-                part=TextPart(
-                    content='Over 100 arrests made as National Guard rolls into DC under',
-                    citations=IsCitationList(),
-                ),
+                part=TextPart(content='Over 100 arrests made as National Guard rolls into DC under'),
                 previous_part_kind='text',
             ),
             PartDeltaEvent(index=16, delta=TextPartDelta(content_delta=" Trump's federal takeover")),
+            _citation_delta_event(16),
             PartEndEvent(
                 index=16,
                 part=TextPart(
@@ -11639,11 +11522,11 @@ Based on the search results, I can identify the top 3 major news stories from ar
             PartStartEvent(
                 index=18,
                 part=TextPart(
-                    content='Air Canada plans to lock out its flight attendants and cancel all flights starting this weekend',
-                    citations=IsCitationList(),
+                    content='Air Canada plans to lock out its flight attendants and cancel all flights starting this weekend'
                 ),
                 previous_part_kind='text',
             ),
+            _citation_delta_event(18),
             PartEndEvent(
                 index=18,
                 part=TextPart(
@@ -11657,8 +11540,7 @@ Based on the search results, I can identify the top 3 major news stories from ar
             PartStartEvent(
                 index=20,
                 part=TextPart(
-                    content='Air Canada says it will begin cancelling flights starting Thursday to allow an orderly shutdown of operations',
-                    citations=IsCitationList(),
+                    content='Air Canada says it will begin cancelling flights starting Thursday to allow an orderly shutdown of operations'
                 ),
                 previous_part_kind='text',
             ),
@@ -11672,6 +11554,7 @@ Based on the search results, I can identify the top 3 major news stories from ar
                 index=20, delta=TextPartDelta(content_delta=' Saturday as it faces a potential work stoppage by')
             ),
             PartDeltaEvent(index=20, delta=TextPartDelta(content_delta=' its flight attendants')),
+            _citation_delta_event(20),
             PartEndEvent(
                 index=20,
                 part=TextPart(
@@ -11764,6 +11647,7 @@ In 1939, Finnish runner Taisto Mäki made history by becoming the first person t
                 "Here's one notable historical event that occurred on September 18th: On September 18, 1793, President George Washington marked the location for the Capitol Building",
                 "Here's one notable historical event that occurred on September 18th: On September 18, 1793, President George Washington marked the location for the Capitol Building in Washington DC, and he",
                 "Here's one notable historical event that occurred on September 18th: On September 18, 1793, President George Washington marked the location for the Capitol Building in Washington DC, and he would return periodically to oversee its",
+                "Here's one notable historical event that occurred on September 18th: On September 18, 1793, President George Washington marked the location for the Capitol Building in Washington DC, and he would return periodically to oversee its construction personally",
                 "Here's one notable historical event that occurred on September 18th: On September 18, 1793, President George Washington marked the location for the Capitol Building in Washington DC, and he would return periodically to oversee its construction personally",
                 "Here's one notable historical event that occurred on September 18th: On September 18, 1793, President George Washington marked the location for the Capitol Building in Washington DC, and he would return periodically to oversee its construction personally.",
                 "Here's one notable historical event that occurred on September 18th: On September 18, 1793, President George Washington marked the location for the Capitol Building in Washington DC, and he would return periodically to oversee its construction personally.",

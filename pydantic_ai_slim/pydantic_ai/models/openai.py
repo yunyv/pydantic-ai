@@ -1943,6 +1943,10 @@ chat_annotations_ta = TypeAdapter(list[chat.chat_completion_message.Annotation])
 raw_annotations_ta = TypeAdapter(list[object])
 
 
+def _marker_citation_anchor(start: int, end: int, text: str) -> MarkerCitationAnchor | None:
+    return MarkerCitationAnchor(start=start, end=end) if 0 <= start < end <= len(text) else None
+
+
 def _map_responses_citations(
     annotations: Sequence[responses.response_output_text.Annotation],
     text: str,
@@ -1951,18 +1955,16 @@ def _map_responses_citations(
     for annotation in annotations:
         if isinstance(annotation, responses.response_output_text.AnnotationURLCitation):
             start, end = annotation.start_index, annotation.end_index
-            if not 0 <= start <= end <= len(text):
-                continue
             citations.append(
                 Citation(
                     sources=[WebCitationSource(url=annotation.url, title=annotation.title)],
-                    anchor=MarkerCitationAnchor(start=start, end=end) if start < end else None,
+                    anchor=_marker_citation_anchor(start, end, text),
                 )
             )
         elif isinstance(annotation, responses.response_output_text.AnnotationFileCitation):
             citations.append(
                 Citation(
-                    sources=[DocumentCitationSource(file_id=annotation.file_id, title=annotation.filename)],
+                    sources=[DocumentCitationSource(document_id=annotation.file_id, title=annotation.filename)],
                     provider_details={'index': annotation.index},
                 )
             )
@@ -1974,14 +1976,21 @@ def _map_chat_citations(annotations: Sequence[BaseModel], text: str) -> list[Cit
     for annotation in annotations:
         if not isinstance(annotation, chat.chat_completion_message.Annotation):
             continue
-        start, end = annotation.url_citation.start_index, annotation.url_citation.end_index
-        if 0 <= start <= end <= len(text):
-            citations.append(
-                Citation(
-                    sources=[WebCitationSource(url=annotation.url_citation.url, title=annotation.url_citation.title)],
-                    anchor=MarkerCitationAnchor(start=start, end=end) if start < end else None,
-                )
+        url_citation = annotation.url_citation
+        start, end = url_citation.start_index, url_citation.end_index
+        content = (url_citation.model_extra or {}).get('content')
+        citations.append(
+            Citation(
+                sources=[
+                    WebCitationSource(
+                        url=url_citation.url,
+                        title=url_citation.title,
+                        excerpts=[content] if isinstance(content, str) and content else [],
+                    )
+                ],
+                anchor=_marker_citation_anchor(start, end, text),
             )
+        )
     return citations or None
 
 
@@ -4093,21 +4102,10 @@ class OpenAIStreamedResponse(StreamedResponse):
         if raw_annotations is None:
             raw_annotations = (choice.delta.model_extra or {}).get('annotations')
         if raw_annotations:
-            part = self._parts_manager.get_part_by_vendor_id('content')
-            if self._pending_raw_annotations or not isinstance(part, TextPart):
-                try:
-                    self._pending_raw_annotations.extend(raw_annotations_ta.validate_python(raw_annotations))
-                except ValidationError:  # pragma: no cover
-                    self._pending_raw_annotations.append(raw_annotations)
-                return
-            citations, provider_details = self._map_chat_annotations(raw_annotations, part)
-            yield from self._parts_manager.handle_text_delta(
-                vendor_part_id='content',
-                content='',
-                provider_name=self.provider_name if provider_details is not None else None,
-                provider_details=provider_details,
-                citations=citations,
-            )
+            try:
+                self._pending_raw_annotations.extend(raw_annotations_ta.validate_python(raw_annotations))
+            except ValidationError:  # pragma: no cover
+                self._pending_raw_annotations.append(raw_annotations)
 
     def _map_chat_annotations(
         self, raw_annotations: object, part: TextPart

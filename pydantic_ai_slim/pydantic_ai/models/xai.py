@@ -1466,32 +1466,30 @@ def _map_inline_citations(inline_citations: Sequence[chat_pb2.InlineCitation], t
                 source = WebCitationSource(url=inline_citation.x_citation.url)
             case 'collections_citation':
                 collection = inline_citation.collections_citation
-                provider_details = {
-                    key: value
-                    for key, value in (
-                        ('chunk_id', collection.chunk_id),
-                        ('collection_ids', list(collection.collection_ids)),
-                        ('score', collection.score),
-                    )
-                    if value
-                }
-                if not collection.file_id and not provider_details:
+                collection_ids = list(collection.collection_ids)
+                if not any((collection.file_id, collection.chunk_id, collection_ids)):
                     continue
+                provider_details: dict[str, Any] = {}
+                if collection.chunk_id:
+                    provider_details['chunk_id'] = collection.chunk_id
+                if collection_ids:
+                    provider_details['collection_ids'] = collection_ids
+                provider_details['score'] = collection.score
                 source = DocumentCitationSource(
-                    file_id=collection.file_id or None,
-                    provider_details=provider_details or None,
+                    document_id=collection.file_id or None,
+                    excerpts=[collection.chunk_content] if collection.chunk_content else [],
+                    provider_details=provider_details,
                 )
             case _:
                 continue
 
         start, end = inline_citation.start_index, inline_citation.end_index
-        if 0 <= start <= end <= len(text):
-            citations.append(
-                Citation(
-                    sources=[source],
-                    anchor=MarkerCitationAnchor(start=start, end=end) if start < end else None,
-                )
+        citations.append(
+            Citation(
+                sources=[source],
+                anchor=MarkerCitationAnchor(start=start, end=end) if 0 <= start < end <= len(text) else None,
             )
+        )
     return citations or None
 
 

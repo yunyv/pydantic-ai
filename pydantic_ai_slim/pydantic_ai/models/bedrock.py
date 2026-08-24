@@ -253,9 +253,12 @@ def _make_document_block(
     return {'document': document}
 
 
-def _make_document_source(data: bytes, media_type: str) -> DocumentSourceTypeDef:
-    if media_type.startswith('text/'):
-        return {'text': data.decode()}
+def _make_document_source(data: bytes, media_type: str, *, include_citations: bool) -> DocumentSourceTypeDef:
+    if include_citations and media_type.startswith('text/'):
+        try:
+            return {'text': data.decode()}
+        except UnicodeDecodeError:
+            pass
     return {'bytes': data}
 
 
@@ -420,14 +423,15 @@ def _map_citation_source(
 ) -> WebCitationSource | DocumentCitationSource:
     details = dict(citation)
     title = citation.get('title')
+    excerpts = [text for content in citation.get('sourceContent', []) if (text := content.get('text'))]
     details.pop('title', None)
     details.pop('sourceContent', None)
     location = citation.get('location')
     web = location.get('web') if isinstance(location, Mapping) else None
     if isinstance(web, Mapping) and isinstance(url := web.get('url'), str):
-        source = WebCitationSource(url=url, title=title, provider_details=details or None)
+        source = WebCitationSource(url=url, title=title, excerpts=excerpts, provider_details=details or None)
     else:
-        source = DocumentCitationSource(title=title, provider_details=details or None)
+        source = DocumentCitationSource(title=title, excerpts=excerpts, provider_details=details or None)
     return source
 
 
@@ -1579,7 +1583,7 @@ class BedrockConverseModel(Model[BaseClient]):
                 return _make_document_block(
                     f'Document {next(document_count)}',
                     file.format,
-                    _make_document_source(file.data, file.media_type),
+                    _make_document_source(file.data, file.media_type, include_citations=include_citations),
                     include_citations=include_citations,
                 )
             elif file.is_video:
@@ -1592,7 +1596,7 @@ class BedrockConverseModel(Model[BaseClient]):
             else:
                 downloaded = await download_item(file, data_format='bytes', type_format='extension')
                 source = (
-                    _make_document_source(downloaded['data'], file.media_type)
+                    _make_document_source(downloaded['data'], file.media_type, include_citations=include_citations)
                     if isinstance(file, DocumentUrl)
                     else {'bytes': downloaded['data']}
                 )

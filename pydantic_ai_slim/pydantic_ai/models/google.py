@@ -2041,10 +2041,22 @@ def _map_grounding_source(chunk: GroundingChunk) -> CitationSource | None:
         )
     if context := chunk.retrieved_context:
         details = context.model_dump(mode='json', exclude_none=True, by_alias=False)
-        if details:
+        excerpts = list(
+            dict.fromkeys(
+                text for text in (context.text, context.rag_chunk.text if context.rag_chunk else None) if text
+            )
+        )
+        details.pop('text', None)
+        if isinstance(rag_chunk := details.get('rag_chunk'), dict):
+            rag_chunk_details = cast(dict[str, Any], rag_chunk)
+            rag_chunk_details.pop('text', None)
+            if not rag_chunk_details:
+                details.pop('rag_chunk')
+        if any((context.document_name, context.title, excerpts, details)):
             return DocumentCitationSource(
-                file_id=context.document_name,
+                document_id=context.document_name,
                 title=context.title,
+                excerpts=excerpts,
                 provider_details={key: value for key, value in details.items() if key not in {'document_name', 'title'}}
                 or None,
             )
@@ -2070,25 +2082,26 @@ def _map_grounding_citations(
         if part_index is None or part_index >= len(parts) or (text := parts[part_index].text) is None:
             continue
 
-        sources = [
-            source
-            for chunk_index in support.grounding_chunk_indices or []
-            if 0 <= chunk_index < len(chunks)
-            if (source := _map_grounding_source(chunks[chunk_index])) is not None
-        ]
+        chunk_indices = support.grounding_chunk_indices or []
+        scores = support.confidence_scores if len(support.confidence_scores or []) == len(chunk_indices) else None
+        sources: list[CitationSource] = []
+        mapped_scores: list[float] = []
+        for position, chunk_index in enumerate(chunk_indices):
+            if 0 <= chunk_index < len(chunks) and (source := _map_grounding_source(chunks[chunk_index])) is not None:
+                sources.append(source)
+                if scores is not None:
+                    mapped_scores.append(scores[position])
 
         if sources:
             start = _character_index(text, segment.start_index or 0)
             end = _character_index(text, segment.end_index)
-            if start is None or end is None or start > end:
-                continue
             citations_by_part.setdefault(part_index, []).append(
                 Citation(
                     sources=sources,
-                    anchor=ContentCitationAnchor(start=start, end=end) if start < end else None,
-                    provider_details={'confidence_scores': support.confidence_scores}
-                    if support.confidence_scores
+                    anchor=ContentCitationAnchor(start=start, end=end)
+                    if start is not None and end is not None and start < end
                     else None,
+                    provider_details={'confidence_scores': mapped_scores} if mapped_scores else None,
                 )
             )
     return citations_by_part

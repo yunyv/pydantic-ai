@@ -15,6 +15,7 @@ from vcr.cassette import Cassette
 from pydantic_ai import (
     Agent,
     BinaryContent,
+    Citation,
     DocumentUrl,
     ModelAPIError,
     ModelHTTPError,
@@ -45,17 +46,16 @@ from .._inline_snapshot import snapshot
 from ..cassette_utils import single_request_body
 from ..conftest import IsDatetime, IsStr, message, try_import
 from .conftest import RequestCapture
-from .citation_utils import citations_from_messages
 from .mock_openai import MockOpenAI, get_mock_chat_completion_kwargs
 
 with try_import() as imports_successful:
-    from openai.types.chat import ChatCompletion, ChatCompletionChunk
+    from openai.types.chat import ChatCompletion, ChatCompletionChunk, chat_completion_message as chat
     from openai.types.chat.chat_completion import Choice
     from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
     from pydantic_ai.models.anthropic import AnthropicModelSettings
     from pydantic_ai.models.fallback import FallbackModel
-    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.models.openai import OpenAIChatModel, _map_chat_citations  # pyright: ignore[reportPrivateUsage]
     from pydantic_ai.models.openrouter import (
         OpenRouterModel,
         OpenRouterModelSettings,
@@ -73,6 +73,33 @@ pytestmark = [
     pytest.mark.vcr,
     pytest.mark.anyio,
 ]
+
+
+def test_openrouter_annotation_content_maps_to_excerpt() -> None:
+    annotation = chat.Annotation.model_validate(
+        {
+            'type': 'url_citation',
+            'url_citation': {
+                'url': 'https://example.com',
+                'title': 'Example',
+                'content': 'Provider-selected supporting passage.',
+                'start_index': 0,
+                'end_index': 0,
+            },
+        }
+    )
+
+    assert _map_chat_citations([annotation], 'Answer') == [
+        Citation(
+            sources=[
+                WebCitationSource(
+                    url='https://example.com',
+                    title='Example',
+                    excerpts=['Provider-selected supporting passage.'],
+                )
+            ]
+        )
+    ]
 
 
 async def test_openrouter_with_preset(allow_model_requests: None, openrouter_api_key: str) -> None:
@@ -244,39 +271,6 @@ async def test_openrouter_tool_calling(allow_model_requests: None, openrouter_ap
             }
         ]
     )
-
-
-async def test_openrouter_web_search_annotations(allow_model_requests: None, openrouter_api_key: str) -> None:
-    """OpenRouter web-search annotations normalize onto the text they qualify."""
-    agent = Agent(
-        OpenRouterModel('deepseek/deepseek-chat', provider=OpenRouterProvider(api_key=openrouter_api_key)),
-        capabilities=[NativeTool(WebSearchTool(max_uses=1))],
-    )
-
-    result = await agent.run("Use web search to find Pydantic AI's GitHub repository and answer with its URL only.")
-
-    citations = citations_from_messages(result.all_messages())
-    assert citations
-    assert all(isinstance(source, WebCitationSource) for citation in citations for source in citation.sources)
-    assert all(citation.anchor is None for citation in citations)
-
-
-async def test_openrouter_web_search_annotations_stream(allow_model_requests: None, openrouter_api_key: str) -> None:
-    """Streaming produces the same normalized OpenRouter citations as the standard path."""
-    agent = Agent(
-        OpenRouterModel('deepseek/deepseek-chat', provider=OpenRouterProvider(api_key=openrouter_api_key)),
-        capabilities=[NativeTool(WebSearchTool(max_uses=1))],
-    )
-
-    async with agent.run_stream(
-        "Use web search to find Pydantic AI's GitHub repository and answer with its URL only."
-    ) as result:
-        await result.get_output()
-
-    citations = citations_from_messages(result.all_messages())
-    assert citations
-    assert all(isinstance(source, WebCitationSource) for citation in citations for source in citation.sources)
-    assert all(citation.anchor is None for citation in citations)
 
 
 async def test_openrouter_with_reasoning(allow_model_requests: None, openrouter_api_key: str) -> None:

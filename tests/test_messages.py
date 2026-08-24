@@ -721,11 +721,20 @@ def test_citation_message_history_round_trip():
                                 WebCitationSource(
                                     url='https://example.com/paris',
                                     title='Paris',
+                                    excerpts=["Paris is France's capital city."],
                                 )
                             ],
                             anchor=MarkerCitationAnchor(start=32, end=35),
                         ),
-                        Citation(sources=[DocumentCitationSource(file_id='file-123', title='report.pdf')]),
+                        Citation(
+                            sources=[
+                                DocumentCitationSource(
+                                    document_id='file-123',
+                                    title='report.pdf',
+                                    excerpts=['The report identifies Paris as the capital.'],
+                                )
+                            ]
+                        ),
                     ],
                 )
             ]
@@ -743,6 +752,7 @@ def test_citation_message_history_round_trip():
                         'kind': 'web',
                         'url': 'https://example.com/paris',
                         'title': 'Paris',
+                        'excerpts': ["Paris is France's capital city."],
                         'provider_details': None,
                     }
                 ],
@@ -753,8 +763,9 @@ def test_citation_message_history_round_trip():
                 'sources': [
                     {
                         'kind': 'document',
-                        'file_id': 'file-123',
+                        'document_id': 'file-123',
                         'title': 'report.pdf',
+                        'excerpts': ['The report identifies Paris as the capital.'],
                         'provider_details': None,
                     }
                 ],
@@ -766,7 +777,7 @@ def test_citation_message_history_round_trip():
 
 
 def test_text_part_delta_appends_citations():
-    citation = Citation(sources=[DocumentCitationSource(file_id='file-123', title='report.pdf')])
+    citation = Citation(sources=[DocumentCitationSource(document_id='file-123', title='report.pdf')])
 
     part = TextPartDelta(content_delta='', citations_delta=[citation]).apply(TextPart('Answer'))
 

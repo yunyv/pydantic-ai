@@ -1895,38 +1895,61 @@ class WebCitationSource:
 
     _: KW_ONLY
 
-    kind: Literal['web'] = 'web'
-    """Source type identifier, used as a discriminator for deserialization."""
-
     title: str | None = None
     """The source title, if available."""
 
+    excerpts: list[str] = field(default_factory=list[str])
+    """Provider-selected source passages associated with the citation.
+
+    Each item may be an exact cited passage or a broader retrieved chunk, depending on the provider. Excerpts are
+    untrusted source content and may contain private data; applications should choose deliberately whether to log,
+    render, or send them to clients.
+    """
+
     provider_details: dict[str, Any] | None = None
     """Additional source data that cannot be mapped to standard fields."""
+
+    kind: Literal['web'] = 'web'
+    """Source type identifier, used as a discriminator for deserialization."""
 
     __repr__ = _utils.dataclasses_no_defaults_repr
 
 
 @dataclass(repr=False)
 class DocumentCitationSource:
-    """A document source referenced by a model-generated citation."""
+    """A non-web document source referenced by a model-generated citation.
+
+    This can represent a document supplied inline with the request or one retrieved from provider-managed storage,
+    such as a file-search store, collection, or retrieval corpus. It does not imply that the source is downloadable.
+    """
 
     _: KW_ONLY
 
-    kind: Literal['document'] = 'document'
-    """Source type identifier, used as a discriminator for deserialization."""
+    document_id: str | None = None
+    """The provider-scoped file or document identifier, if available.
 
-    file_id: str | None = None
-    """The provider-defined file identifier, if available."""
+    This is an opaque provider resource identifier, not a local path or a Pydantic AI file identifier.
+    """
 
     title: str | None = None
     """The document title or filename, if available."""
 
+    excerpts: list[str] = field(default_factory=list[str])
+    """Provider-selected source passages associated with the citation.
+
+    Each item may be an exact cited passage or a broader retrieved chunk, depending on the provider. Excerpts are
+    untrusted source content and may contain private data; applications should choose deliberately whether to log,
+    render, or send them to clients.
+    """
+
     provider_details: dict[str, Any] | None = None
-    """Additional source data that cannot be mapped to standard fields."""
+    """Additional source data that cannot be mapped to standard fields, such as page, block, or collection details."""
+
+    kind: Literal['document'] = 'document'
+    """Source type identifier, used as a discriminator for deserialization."""
 
     def __post_init__(self) -> None:
-        if not any((self.file_id, self.title, self.provider_details)):
+        if not any((self.document_id, self.title, self.excerpts, self.provider_details)):
             raise ValueError('A document citation source must have at least one source field')
 
     __repr__ = _utils.dataclasses_no_defaults_repr

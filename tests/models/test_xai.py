@@ -19,7 +19,7 @@ from __future__ import annotations as _annotations
 import json
 from datetime import timezone
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from pydantic import BaseModel
@@ -63,7 +63,6 @@ from pydantic_ai import (
     VideoUrl,
     WebCitationSource,
     WebSearchTool,
-    XSearchTool,
 )
 from pydantic_ai.capabilities import NativeTool
 from pydantic_ai.exceptions import UnexpectedModelBehavior
@@ -1408,76 +1407,6 @@ async def test_xai_web_search_user_location_recorded(allow_model_requests: None,
     )
 
 
-def _xai_citation_summary(messages: list[ModelMessage]) -> dict[str, Any]:
-    response = messages[-1]
-    assert isinstance(response, ModelResponse)
-    text_part = next(part for part in response.parts if isinstance(part, TextPart))
-    x_search_returns = [
-        part for part in response.parts if isinstance(part, NativeToolReturnPart) and part.tool_name == 'x_search'
-    ]
-    source_inventories = [part.content for part in x_search_returns]
-    assert source_inventories and all(inventory == source_inventories[0] for inventory in source_inventories)
-    source_inventory = source_inventories[0]
-    assert isinstance(source_inventory, dict)
-    source_urls = cast(list[str], source_inventory['citations'])
-    assert isinstance(source_urls, list) and all(isinstance(url, str) for url in source_urls)
-    return {
-        'citations': text_part.citations,
-        'citation_markers': [
-            text_part.content[citation.anchor.start : citation.anchor.end]
-            for citation in text_part.citations or []
-            if isinstance(citation.anchor, MarkerCitationAnchor)
-        ],
-        'x_search_call_count': len(x_search_returns),
-        'x_search_source_count': len(source_urls),
-    }
-
-
-async def test_xai_x_search_citations_recorded(allow_model_requests: None, xai_provider: XaiProvider) -> None:
-    """Record both xAI inline citations and raw X search output for comparison."""
-    agent = Agent(
-        XaiModel(XAI_NON_REASONING_MODEL, provider=xai_provider),
-        capabilities=[NativeTool(XSearchTool(allowed_x_handles=['pydantic'], include_output=True))],
-        model_settings=ModelSettings(include_citations=True),
-    )
-
-    result = await agent.run(
-        'Use X search to find a post by @pydantic about Pydantic AI. Summarize it and cite the post URL.'
-    )
-
-    assert _xai_citation_summary(result.all_messages()) == snapshot(
-        {
-            'citation_markers': ['[[1]](https://x.com/pydantic/status/1863538947059544218)'],
-            'citations': [
-                Citation(
-                    sources=[WebCitationSource(url='https://x.com/pydantic/status/1863538947059544218')],
-                    anchor=MarkerCitationAnchor(start=227, end=283),
-                )
-            ],
-            'x_search_call_count': 4,
-            'x_search_source_count': 15,
-        }
-    )
-
-
-async def test_xai_x_search_citations_streamed_recorded(allow_model_requests: None, xai_provider: XaiProvider) -> None:
-    """Record when inline citations and raw X search output arrive during streaming."""
-    agent = Agent(
-        XaiModel(XAI_NON_REASONING_MODEL, provider=xai_provider),
-        capabilities=[NativeTool(XSearchTool(allowed_x_handles=['pydantic'], include_output=True))],
-        model_settings=ModelSettings(include_citations=True),
-    )
-
-    async with agent.run_stream(
-        'Use X search to find a post by @pydantic about Pydantic AI. Summarize it and cite the post URL.'
-    ) as result:
-        await result.get_output()
-
-    assert _xai_citation_summary(result.all_messages()) == snapshot(
-        {'citation_markers': [], 'citations': None, 'x_search_call_count': 4, 'x_search_source_count': 10}
-    )
-
-
 async def test_xai_inline_citation_mapping(allow_model_requests: None) -> None:
     text = 'See [1], [2], and [3].'
     response = create_response(content=text)
@@ -1499,9 +1428,9 @@ async def test_xai_inline_citation_mapping(allow_model_requests: None) -> None:
                 collections_citation=chat_pb2.CollectionsCitation(
                     file_id='file-1',
                     chunk_id='chunk-1',
-                    chunk_content='provider excerpt is deliberately not exposed',
+                    chunk_content='provider-selected supporting excerpt',
                     collection_ids=['collection-1'],
-                    score=0.5,
+                    score=0.0,
                 ),
             ),
             chat_pb2.InlineCitation(start_index=2, end_index=1),
@@ -1533,16 +1462,18 @@ async def test_xai_inline_citation_mapping(allow_model_requests: None) -> None:
         Citation(
             sources=[
                 DocumentCitationSource(
-                    file_id='file-1',
+                    document_id='file-1',
+                    excerpts=['provider-selected supporting excerpt'],
                     provider_details={
                         'chunk_id': 'chunk-1',
                         'collection_ids': ['collection-1'],
-                        'score': 0.5,
+                        'score': 0.0,
                     },
                 )
             ],
             anchor=MarkerCitationAnchor(start=18, end=21),
         ),
+        Citation(sources=[WebCitationSource(url='https://invalid.example.com')]),
     ]
 
 

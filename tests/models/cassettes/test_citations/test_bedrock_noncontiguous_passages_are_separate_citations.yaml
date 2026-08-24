@@ -1,0 +1,78 @@
+interactions:
+- request:
+    body: '{"messages": [{"role": "user", "content": [{"text": "In one sentence, state where the first office opened and where
+      headquarters later moved. Cite both supporting passages."}, {"document": {"name": "Document 1", "format": "txt", "source":
+      {"text": "The company opened its first office in Paris in 1998.\n\nAfter several international expansions, it moved
+      its headquarters to Berlin in 2024."}, "citations": {"enabled": true}}}]}], "system": [], "inferenceConfig": {}}'
+    headers:
+      amz-sdk-invocation-id:
+      - !!binary |
+        MGU2MTFkZTQtMmU5My00NzJhLWFjNmMtY2RjYmRmOTQ1ZTBi
+      amz-sdk-request:
+      - !!binary |
+        YXR0ZW1wdD0x
+      content-length:
+      - '467'
+      content-type:
+      - !!binary |
+        YXBwbGljYXRpb24vanNvbg==
+    method: POST
+    uri: https://bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse
+  response:
+    headers:
+      connection:
+      - keep-alive
+      content-length:
+      - '987'
+      content-type:
+      - application/json
+    parsed_body:
+      metrics:
+        latencyMs: 2524
+      output:
+        message:
+          content:
+          - citationsContent:
+              citations:
+              - location:
+                  documentChar:
+                    documentIndex: 0
+                    end: 55
+                    start: 0
+                sourceContent:
+                - text: |+
+                    The company opened its first office in Paris in 1998.
+
+                title: Document 1
+              content:
+              - text: The first office opened in Paris in 1998
+          - text: ', and '
+          - citationsContent:
+              citations:
+              - location:
+                  documentChar:
+                    documentIndex: 0
+                    end: 139
+                    start: 55
+                sourceContent:
+                - text: After several international expansions, it moved its headquarters to Berlin in 2024.
+                title: Document 1
+              content:
+              - text: headquarters later moved to Berlin in 2024
+          - text: .
+          role: assistant
+      stopReason: end_turn
+      usage:
+        cacheReadInputTokenCount: 0
+        cacheReadInputTokens: 0
+        cacheWriteInputTokenCount: 0
+        cacheWriteInputTokens: 0
+        inputTokens: 623
+        outputTokens: 57
+        serverToolUsage: {}
+        totalTokens: 680
+    status:
+      code: 200
+      message: OK
+version: 1
+...
